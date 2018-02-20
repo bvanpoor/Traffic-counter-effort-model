@@ -1,0 +1,164 @@
+model{
+  
+  ### PRIORS ###
+  mu.fish ~ dbeta(1,1)           # mean probability of fishing across days
+  prec.fish ~ dgamma(0.01,0.01)  # mean precision of fishing across days
+  a.fish <- mu.fish*prec.fish
+  b.fish <- prec.fish-a.fish
+  
+  mu.int.t ~ dnorm(0,1.47)      # mean of intercept of logistic trailer probability
+  tau.int.t ~ dgamma(0.01,0.01) # precision of intercept of logistic trailer probability
+  alphT.T ~ dnorm(0,1.47)       # effect of temperature of trailer probability
+  alphT.P ~ dnorm(0,1.47)       # effect of precipitation on trailer probability
+  alphT.B ~ dnorm(0,1.47)       # interaction effect
+  alphT.D ~ dnorm(0,1.47)       # weekend effect
+
+  # trip length priors
+  ftrip ~ dunif(0,12)   # mean trip length
+  btrip <- 2            # mean non-fishing trip length
+  
+  # fishing trip timing
+  mu.muf1 ~ dnorm(0,0.01)       # hyper-mean of mean of  cumulative daily fishing arrival
+  mu.muf2 ~ dgamma(0.001,0.001) # hyper-prec of mean of cumulative daily fishing arrival
+  prec.f1 ~ dgamma(0.001,0.001) # hyper-mean of precision of cumulative daily fishing arrival
+  prec.f2 ~ dgamma(0.001,0.001) # hyper-prec of precision of cumulative daily fishing arrival
+
+  # boating trip timing
+  mu.mub1 ~ dnorm(0,0.01)       # hyper-mean of mean of  cumulative daily boating arrival
+  mu.mub2 ~ dgamma(0.001,0.001) # hyper-prec of mean of cumulative daily boating arrival
+  prec.b1 ~ dgamma(0.001,0.001) # hyper-mean of precision of cumulative daily boating arrival
+  prec.b2 ~ dgamma(0.001,0.001) # hyper-prec of precision of cumulative daily boating arrival
+  
+  mu.nb1 ~ dnorm(0,0.01)         # hyper-mean of mean of  cumulative daily non-boating arrival
+  mu.nb2 ~ dgamma(0.001,0.001)   # hyper-prec of mean of cumulative daily non-boating arrival
+  prec.nb1 ~ dgamma(0.001,0.001) # hyper-mean of prec of cumulative daily non-boating arrival
+  prec.nb2 ~ dgamma(0.001,0.001) # hyper-prec of prec of cumulative daily non-boating arrival
+  
+  for( d in 1:ndays ){
+    nvisit[d] ~ dunif(0,1000)          # number of total visitors per day
+    
+    pfishing[d] ~ dbeta(a.fish,b.fish) # probability of fishing
+    
+    int.t[d] ~ dnorm(mu.int.t,tau.int.t)
+    logit(ptrail[d]) <- int.t[d] + alphT.D*DoW[d] + alphT.T*Temp[d] + 
+                        alphT.P*Precip[d] + alphT.B*Temp[d]*Precip[d]
+                        # probability of having a trailer if not fishing
+
+    mu.fnorm[d] ~ dnorm(mu.muf1,mu.muf2)     # mean of cumulative fishing arrival
+    prec.fnorm[d] ~ dgamma(prec.f1,prec.f2)  # precision of cumulative fishing arrival
+
+    mu.bnorm[d] ~ dnorm(mu.mub1,mu.mub2)     # mean of cumulative boating arrival
+    prec.bnorm[d] ~ dgamma(prec.b1,prec.b2)  # precision of cumulative boating arrival
+    
+    mu.nbnorm[d] ~ dnorm(mu.nb1,mu.nb2)        # mean of cumulative non-boating arrival
+    prec.nbnorm[d] ~ dgamma(prec.nb1,prec.nb2) # precision of cumulative non-boating arrival
+  }
+
+  tau.Tc ~ dgamma(0.001,0.001)
+  tau.Cc ~ dgamma(0.001,0.001)
+  tau.Ac ~ dgamma(0.001,0.001)
+
+  ### CALCULATE EFFORT ###
+  
+  for( d in 1:ndays ){          # loop over days
+
+    # number of anglers per day
+    nfish[d] <- nvisit[d] * pfishing[d]
+    
+    # number of non-fishing boaters per day
+    nboat[d] <- nvisit[d] * (1-pfishing[d])*ptrail[d]
+    
+    # number of non-boaters
+    nnoboat[d] <- nvisit[d] * (1-pfishing[d])*(1-ptrail[d])
+
+    for( t in 1:24 ){           # loop over hours of day
+      # fishing boats arriving to launch boat
+      F.a[d,t] <- nfish[d]*pnorm(t,mu.fnorm[d],prec.fnorm[d])
+      # fishing boats departing lake
+      F.d[d,t] <- nfish[d]*pnorm(t-ftrip,mu.fnorm[d],prec.fnorm[d])
+      # total number of boats fishing per hour
+      fish.boat[d,t] <- F.a[d,t] - F.d[d,t]
+      
+      ## PREDICT EFFORT BY HOUR/DAY
+      Et.h[d,t] ~ dlnorm(log(fish.boat[d,t]+1E-6),tau.Ac)
+      
+      # non-fishing boats arriving to launch boat
+      B.a[d,t] <- nboat[d]*pnorm(t,mu.bnorm[d],prec.bnorm[d])
+      # non-fishing boats departing lake
+      B.d[d,t] <- nboat[d]*pnorm(t-btrip,mu.bnorm[d],prec.bnorm[d])
+      # total number of non-fishing boats per hour
+      nofish.boat[d,t] <- B.a[d,t] - B.d[d,t]
+      
+      # non-fishing non-boating coming and leaving boat launch
+      NB[d,t] <- nnoboat[d]*pnorm(t,mu.nbnorm[d],prec.nbnorm[d])
+    }
+    Et[d] <- sum(Et.h[d,])
+  }
+  E <- sum(Et)
+  
+  ### LIKELIHOODS ###
+  
+  # predict traffic counter counts
+  for( d in 1:ndays ){          # loop over days
+    # boating traffic in first hour as detected by traffic counter
+    trail.t[d,1] <- (F.a[d,1]+F.d[d,1]+B.a[d,1]+B.d[d,1])
+    car.t[d,1] <- NB[d,1]
+    traf[d,1] <- trail.t[d,1]+car.t[d,1]
+    for( t in 2:24 ){           # loop over hours of day
+      # boating traffic each hour
+      trail.t[d,t] <- (F.a[d,t]+F.d[d,t]+B.a[d,t]+B.d[d,t]) - 
+                      (F.a[d,t-1]+F.d[d,t-1]+B.a[d,t-1]+B.d[d,t-1])
+      # non-boating counts each hour
+      car.t[d,t] <- (NB[d,t] - NB[d,t-1])
+
+      # total traffic counts each hour
+      traf[d,t] <- (trail.t[d,t]+car.t[d,t])*ncount
+    }
+  }
+
+  # likelihood of traffic counter data
+  for( i in 1:n.Tc.obs ){
+    mu.Tc[i] ~ dlnorm(log(traf[Tc.day[i],Tc.hour[i]]+1E-6),tau.Tc)
+    T.c[i] ~ dpois(mu.Tc[i])
+  }
+  
+  # likelihood of independent car counts
+  for( i in 1:n.Cc ){                             # loop over car counts 
+    # compare car count observations (Cc) to predicted number of cars with (traf.b) 
+    #     and without (traf.n) boats
+        # 1: cars in with boat
+        # 2: cars without boat
+    mu.boat[i] ~ dlnorm( trail.t[Cc.d[i],Cc.h[i]] + 1E-6,tau.Cc)
+    mu.noboat[i] ~ dlnorm( car.t[Cc.d[i],Cc.h[i]] + 1E-6,tau.Cc)
+    Cc[i,1] ~ dpois( mu.boat[i])#trail.t[Cc.d[i],Cc.h[i]])
+    Cc[i,2] ~ dpois( mu.noboat[i])#car.t[Cc.d[i],Cc.h[i]])
+  }
+
+  # likelihood of trip length
+  for(i in 1:n.tr){
+    trips[i] ~ dlnorm(log(ftrip),100)
+  }
+  
+  # likelihood of independent angler counts
+  for(d in 1:n.Acd){
+    for(h in 1:n.Ach.f[d]){
+      # state-space estimates for fishing boats on the water
+      mu.fishboat[d,h] ~ dlnorm(log(fish.boat[Ac.d2[d],Ac.h2.f[d,h]+min.Ach-1]+1E-6),tau.Ac)  
+      # likelihoods of fishing and non-fishing boats on the water
+      t.fish[d,Ac.h2.f[d,h]] ~ dpois( mu.fishboat[d,h])
+      e.fish[d,h] <- t.fish[d,Ac.h2.f[d,h]] - mu.fishboat[d,h]
+    }
+    for(h in 1:n.Ach.nf[d]){
+      mu.nofishboat[d,h] ~ dlnorm(log(nofish.boat[Ac.d2[d],Ac.h2.nf[d,h]+min.Ach-1]+1E-6),
+            tau.Ac)
+      t.nofish[d,Ac.h2.nf[d,h]] ~ dpois( mu.nofishboat[d,h])
+    }
+  }
+
+#  for(i in 1:n.val){
+#    mu.fishboat2[i] ~ dlnorm(log(fish.boat[val.d[i],val.h[i]]+1E-6),tau.Ac)
+#    pred.E[i] <- mu.fishboat2[i]
+#    err[i] <- pow(val.E[i]-pred.E[i],2)
+#  }
+#  RMSE <- pow(sum(err)/(n.val-1),0.5)
+}
